@@ -1,73 +1,47 @@
-import os
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-
-# Завантажуємо куки з .env
-load_dotenv()
 
 def get_text_from_url(url):
-    print(f"📡 Requests (Cookie Mode): Стукаю на {url}...")
-
-    # Беремо дані з .env
-    cookie_str = os.getenv("NOVELBIN_COOKIE")
-    user_agent = os.getenv("MY_USER_AGENT")
-
-    if not cookie_str or not user_agent:
-        print("❌ ПОМИЛКА: Не заповнені NOVELBIN_COOKIE або MY_USER_AGENT в .env файлі!")
-        return None, None
-
-    # Перетворюємо рядок куків у словник
-    cookies = {}
-    for item in cookie_str.split(';'):
-        if '=' in item:
-            name, value = item.strip().split('=', 1)
-            cookies[name] = value
-
-    headers = {
-        'User-Agent': user_agent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://novelbin.com/',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Fetch-User': '?1',
-    }
-
+    print(f"📡 curl_cffi (FreeWebNovel): Завантажую {url}...")
+    
     try:
-        # Робимо запит з твоїми куками (обходимо Cloudflare)
-        response = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+        response = requests.get(
+            url, 
+            impersonate="chrome120", 
+            timeout=15
+        )
         
-        if response.status_code == 403:
-            print("❌ Помилка 403. Куки прострочені або IP забанено.")
-            print("💡 Порада: Онови NOVELBIN_COOKIE в .env зі свіжого браузера.")
-            return None, None
-            
         if response.status_code != 200:
             print(f"❌ Помилка: Код {response.status_code}")
             return None, None
 
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Шукаємо текст
-        content_div = soup.find('div', id='chr-content')
-        if not content_div:
-            content_div = soup.find('div', id='chapter-content')
+        # Шукаємо головний контейнер
+        content_div = soup.find('div', class_='txt') or soup.find('div', id='article') or soup.find('div', id='chr-content')
             
         if not content_div:
-            print("❌ Текст не знайдено (можливо, куки не спрацювали або верстка змінилася).")
+            print("❌ Текст не знайдено на сторінці (можливо, невірна адреса).")
             return None, None
 
-        # Очищаємо від сміття (реклама, приховані абзаци)
-        for tag in content_div(["script", "style", "div", "a", "button", "iframe", "p.display-none"]):
+        # Очищаємо дуже обережно (не чіпаємо div та a)
+        for tag in content_div(["script", "style", "button", "iframe", "ins", "form"]):
             tag.decompose()
             
-        text = content_div.get_text(separator='\n\n').strip()
+        # Спочатку пробуємо зібрати всі абзаци <p> (це найчистіший спосіб)
+        paragraphs = content_div.find_all('p')
+        if paragraphs:
+            text = '\n\n'.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+        else:
+            # Якщо <p> немає, беремо просто текст з блоку
+            text = content_div.get_text(separator='\n\n', strip=True)
+            
+        if not text:
+             print("❌ Блок знайдено, але текст пустий.")
+             return None, None
         
         title = "Shadow Slave Chapter"
-        title_tag = soup.find('span', class_='chr-text')
+        title_tag = soup.find('h1', class_='tit') or soup.find('h1')
         if title_tag:
             title = title_tag.text.strip()
             
@@ -79,5 +53,5 @@ def get_text_from_url(url):
         return None, None
 
 def get_novelbin_chapter(chapter_number):
-    url = f"https://novelbin.com/b/shadow-slave/chapter-{chapter_number}"
+    url = f"https://freewebnovel.com/shadow-slave/chapter-{chapter_number}.html"
     return get_text_from_url(url)

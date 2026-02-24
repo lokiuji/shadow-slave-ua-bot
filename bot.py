@@ -1,73 +1,135 @@
 import os
-import time
-from google import genai
+import re
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
+from telegraph import Telegraph
 
-# Завантажуємо ключі з .env
+# Зверни увагу: ми додали імпорт translate_chunk для перекладу заголовка
+from translator import translate_full_chapter, translate_chunk
+from scraper import get_novelbin_chapter, get_text_from_url 
+
 load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
-# Налаштування нового клієнта
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+telegraph = Telegraph()
+telegraph.create_account(short_name='ShadowSlaveBot')
 
-SYSTEM_PROMPT = """
-Ти професійний перекладач ранобе. Твоя задача — перекласти текст українською мовою.
-ГЛОСАРІЙ ТА ПРАВИЛА ДЛЯ "SHADOW SLAVE":
-1. Sunny -> Санні (чоловічий рід).
-2. Nephis -> Нефіс (жіночий рід).
-3. Cassie -> Кессі.
-4. Nightmare Spell -> Кошмарне Закляття.
-5. Awakened -> Пробуджений.
-6. Legacy -> Спадок.
-7. Aspect -> Аспект.
-8. Flaw -> Вада.
-9. Weaver -> Ткач.
-10. Soul Sea -> Море Душі.
-Стиль: художній, похмурий, зберігай атмосферу. Не роби дослівний переклад ідіом.
-"""
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-def split_text(text, max_chunk_size=3000):
-    """Розбиває текст на шматки, щоб не перевантажити запит."""
-    chunks = []
-    current_chunk = ""
-    for paragraph in text.split('\n'):
-        if len(current_chunk) + len(paragraph) < max_chunk_size:
-            current_chunk += paragraph + "\n"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привіт! Надішли мені номер глави або пряме посилання."
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.from_user: return
+    
+    # Перевірка на адміна
+    if ADMIN_ID and str(update.message.from_user.id) != str(ADMIN_ID):
+        await update.message.reply_text("⛔ Доступ заборонено.")
+        return
+
+    user_input = update.message.text.strip()
+    status_msg = await update.message.reply_text("⏳ Обробляю запит...")
+
+    try:
+        eng_title, eng_text = "", ""
+
+        # Вибір методу пошуку
+        if user_input.isdigit():
+            await status_msg.edit_text(f"🔎 Шукаю главу {user_input}...")
+            eng_title, eng_text = get_novelbin_chapter(user_input)
+        elif user_input.startswith("http"):
+            await status_msg.edit_text(f"🔗 Завантажую за посиланням...")
+            eng_title, eng_text = get_text_from_url(user_input)
         else:
-            chunks.append(current_chunk)
-            current_chunk = paragraph + "\n"
-    if current_chunk:
-        chunks.append(current_chunk)
-    return chunks
+            await status_msg.edit_text("🔢 Надішли номер глави (цифрами) або пряме посилання.")
+            return
 
-def translate_chunk(text_chunk, retries=5):
-    """Перекладає шматок з повторними спробами при помилці."""
-    attempt = 0
-    while attempt < retries:
-        try:
-            full_prompt = f"{SYSTEM_PROMPT}\n\nТекст:\n{text_chunk}"
-            # Використання нового формату генерації
-            response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=full_prompt
-            )
-            if response.text:
-                return response.text
-        except Exception as e:
-            wait_time = (2 ** attempt) * 5
-            print(f"⚠️ Помилка Gemini: {e}. Чекаємо {wait_time} сек...")
-            time.sleep(wait_time)
-            attempt += 1
-    return "[ПОМИЛКА ПЕРЕКЛАДУ]"
+        if not eng_text:
+            await status_msg.edit_text("❌ Не вдалося завантажити текст.")
+            return
 
-def translate_full_chapter(full_text):
-    chunks = split_text(full_text)
-    translated_text = ""
-    
-    print(f"Розпочато переклад. Шматків: {len(chunks)}")
-    
-    for i, chunk in enumerate(chunks):
-        translated_part = translate_chunk(chunk)
-        translated_text += translated_part + "\n\n"
-        time.sleep(2)
+        # --- РОЗУМНЕ ФОРМАТУВАННЯ ЗАГОЛОВКА ---
+        # Шукаємо слово Chapter/Ch, беремо цифри, і все що після них - це назва
+        match = re.search(r'(?:Chapter|Ch\.?)\s*(\d+)\s*[:\-]?\s*(.*)', eng_title, re.IGNORECASE)
         
-    return translated_text
+        if match:
+            chapter_num = match.group(1)
+            chapter_name_eng = match.group(2).strip()
+        else:
+            chapter_num = user_input if user_input.isdigit() else "?"
+            chapter_name_eng = eng_title
+
+        await status_msg.edit_text(f"📖 Знайдено: Глава {chapter_num}\n✨ Перекладаю назву та текст...")
+        
+        # Перекладаємо назву глави (якщо вона є)
+        if chapter_name_eng:
+            ukr_chapter_name = translate_chunk(chapter_name_eng).strip()
+            # Прибираємо зірочки, якщо ШІ вирішив зробити текст жирним
+            ukr_chapter_name = ukr_chapter_name.replace("**", "").replace("*", "")
+            formatted_subtitle = f"Глава {chapter_num} - {ukr_chapter_name}"
+        else:
+            formatted_subtitle = f"Глава {chapter_num}"
+
+        # --- ПЕРЕКЛАД ТЕКСТУ ---
+        ukr_text = translate_full_chapter(eng_text)
+        
+        if "[ПОМИЛКА ПЕРЕКЛАДУ]" in ukr_text:
+             await status_msg.edit_text("❌ Помилка Gemini API.")
+             return
+
+        await status_msg.edit_text("📝 Формую Telegraph...")
+        
+        # --- ОФОРМЛЕННЯ TELEGRAPH ---
+        # Додаємо форматований заголовок на самий початок тексту Telegraph
+        html_content = (
+            f"<h2>Тіньовий Раб - Shadow Slave</h2>"
+            f"<h3>{formatted_subtitle}</h3><hr><br>"
+            + ukr_text.replace('\n', '<br>')
+        )
+        
+        response = telegraph.create_page(
+            title=f"Shadow Slave | {formatted_subtitle}", # Заголовок вкладки в браузері
+            html_content=html_content,
+            author_name='Shadow Slave UKR'
+        )
+        
+        telegraph_url = response['url']
+        
+        # --- ОФОРМЛЕННЯ POST-ПОВІДОМЛЕННЯ ---
+        post_text = (
+            f"Тіньовий Раб - Shadow Slave\n"
+            f"{formatted_subtitle}\n\n"
+            f"👉 {telegraph_url}"
+        )
+        
+        if CHANNEL_ID:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=post_text)
+            await status_msg.edit_text(f"✅ Готово і відправлено в канал!\n{telegraph_url}")
+        else:
+            await status_msg.edit_text(f"✅ Готово!\n\n{post_text}")
+        
+    except Exception as e:
+        error_text = f"❌ Критична помилка: {str(e)}"
+        print(error_text)
+        await status_msg.edit_text(error_text)
+
+if __name__ == '__main__':
+    if not TOKEN:
+        print("Помилка: Немає токена в .env")
+        exit()
+
+    application = ApplicationBuilder().token(TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    
+    print("🤖 Бот запущено! Чекаю на команди...")
+    application.run_polling()

@@ -1,15 +1,11 @@
 import os
 import time
-import google.generativeai as genai
-from google.api_core import exceptions
+from google import genai
 from dotenv import load_dotenv
 
-# Завантажуємо ключі з .env
 load_dotenv()
 
-# Налаштування
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """
 Ти професійний перекладач ранобе. Твоя задача — перекласти текст українською мовою.
@@ -28,7 +24,6 @@ SYSTEM_PROMPT = """
 """
 
 def split_text(text, max_chunk_size=3000):
-    """Розбиває текст на шматки, щоб не перевантажити запит."""
     chunks = []
     current_chunk = ""
     for paragraph in text.split('\n'):
@@ -42,22 +37,20 @@ def split_text(text, max_chunk_size=3000):
     return chunks
 
 def translate_chunk(text_chunk, retries=5):
-    """Перекладає шматок з повторними спробами при помилці 429."""
     attempt = 0
     while attempt < retries:
         try:
             full_prompt = f"{SYSTEM_PROMPT}\n\nТекст:\n{text_chunk}"
-            response = model.generate_content(full_prompt)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=full_prompt
+            )
             if response.text:
                 return response.text
-        except exceptions.ResourceExhausted:
-            wait_time = (2 ** attempt) * 5
-            print(f"⚠️ Ліміт Gemini. Чекаємо {wait_time} сек...")
-            time.sleep(wait_time)
-            attempt += 1
         except Exception as e:
-            print(f"❌ Помилка: {e}")
-            time.sleep(5)
+            wait_time = (2 ** attempt) * 5
+            print(f"⚠️ Помилка Gemini: {e}. Чекаємо {wait_time} сек...")
+            time.sleep(wait_time)
             attempt += 1
     return "[ПОМИЛКА ПЕРЕКЛАДУ]"
 
@@ -70,7 +63,6 @@ def translate_full_chapter(full_text):
     for i, chunk in enumerate(chunks):
         translated_part = translate_chunk(chunk)
         translated_text += translated_part + "\n\n"
-        # Пауза між шматками, щоб не дратувати API
         time.sleep(2)
         
     return translated_text
