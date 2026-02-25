@@ -15,14 +15,13 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 telegraph = Telegraph()
-telegraph.create_account(short_name='ShadowSlaveBot')
+telegraph.create_account(short_name='Shadow Slave')
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# Файл, де бот буде запам'ятовувати поточну главу (щоб не забути після перезапуску)
 STATE_FILE = "current_chapter.txt"
 
 def get_current_chapter():
@@ -32,7 +31,7 @@ def get_current_chapter():
                 return int(f.read().strip())
     except Exception as e:
         print(f"Помилка читання файлу стану: {e}")
-    return 1 # Якщо файлу немає, починаємо з 1
+    return 1
 
 def save_current_chapter(chapter_num):
     with open(STATE_FILE, "w") as f:
@@ -41,103 +40,90 @@ def save_current_chapter(chapter_num):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привіт! Надішли номер глави, посилання, або використай команди:\n"
-        "▶️ /auto [номер] - Запустити спідран-переклад (1 глава кожні 5 сек)\n"
+        "▶️ /auto [номер] - Запустити авто-переклад\n"
         "⏸ /stop - Зупинити авто-переклад"
     )
 
-# --- АВТОМАТИЧНА ФУНКЦІЯ (ПЛАНУВАЛЬНИК) ---
 async def auto_translate_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     chapter_num = get_current_chapter()
     
-    await context.bot.send_message(chat_id=chat_id, text=f"🤖 Спідран-режим: Починаю главу {chapter_num}...")
+    await context.bot.send_message(chat_id=chat_id, text=f"🤖 Починаю главу {chapter_num}...")
     
     try:
         eng_title, eng_text = get_novelbin_chapter(str(chapter_num))
         
         if not eng_text:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Не вдалося знайти главу {chapter_num}. Можливо, це кінець? Зупиняю автопілот.")
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Не вдалося знайти главу {chapter_num}.")
             return
 
-        # Парсинг заголовка
         match = re.search(r'(?:Chapter|Ch\.?)\s*(\d+)\s*[:\-]?\s*(.*)', eng_title, re.IGNORECASE)
         if match:
             c_num = match.group(1)
             chapter_name_eng = match.group(2).strip()
         else:
             c_num = str(chapter_num)
-            chapter_name_eng = eng_title
+            chapter_name_eng = eng_title.replace("Shadow Slave", "").strip(" -:")
 
+        ukr_name = ""
         if chapter_name_eng:
-            # Викликаємо нашу нову сувору функцію
             ukr_name = translate_title(chapter_name_eng)
-            
-            # Формуємо рядок самі: "Глава X - Назва"
-            # Якщо переклад назви чомусь дублює номер, лишаємо тільки назву
-            formatted_subtitle = f"Глава {chapter_num} - {ukr_name}"
+        
+        # ЯКЩО Є НАЗВА — СТАВИМО ДВОКРАПКУ, ЯКЩО НЕМА — ПРОСТО ГЛАВА
+        if ukr_name:
+            formatted_subtitle = f"Глава {c_num}: {ukr_name}"
         else:
-            formatted_subtitle = f"Глава {chapter_num}"
+            formatted_subtitle = f"Глава {c_num}"
 
-        # Переклад
         ukr_text = translate_full_chapter(eng_text)
         
         if "[ПОМИЛКА ПЕРЕКЛАДУ]" in ukr_text:
-             await context.bot.send_message(chat_id=chat_id, text=f"❌ Помилка API на главі {chapter_num}. Спробую ще раз через 30 сек.")
-             context.job_queue.run_once(auto_translate_job, 30, chat_id=chat_id, name="auto_translation")
+             await context.bot.send_message(chat_id=chat_id, text=f"❌ Помилка API. Спробую ще раз через 60 сек.")
+             context.job_queue.run_once(auto_translate_job, 60, chat_id=chat_id, name="auto_translation")
              return
 
-        # Формування Telegraph
-        html_content = (
-            f"<h3>Тіньовий Раб (Shadow Slave)</h3>"
-            f"<h4>{formatted_subtitle}</h4><hr><br>"
-            + ukr_text.replace('\n\n', '<br><br>').replace('\n', ' ')
-        )
+        # ІДЕАЛЬНЕ ОФОРМЛЕННЯ TELEGRAPH (БЕЗ ДУБЛІКАТІВ)
+        paragraphs = [p.strip() for p in ukr_text.split('\n') if p.strip()]
+        html_content = "".join([f"<p>{p}</p>" for p in paragraphs])
+        
         response = telegraph.create_page(
-            title=f"Shadow Slave | {formatted_subtitle}",
-            html_content=html_content,
+            title=f"Тіньовий Раб | {formatted_subtitle}", # Telegraph сам зробить це головним заголовком
+            html_content=html_content, # Тут тепер ТІЛЬКИ текст, без зайвих <h3>
             author_name='Shadow Slave UKR'
         )
         telegraph_url = response['url']
         
-        # Відправка в канал
-        post_text = f"Тіньовий Раб - Shadow Slave\n{formatted_subtitle}\n\n👉 {telegraph_url}"
+        post_text = f"📖 Тіньовий Раб\n🔖 {formatted_subtitle}\n\n👉 {telegraph_url}"
         
         if CHANNEL_ID:
             await context.bot.send_message(chat_id=CHANNEL_ID, text=post_text)
-            # Додаємо повідомлення тобі, щоб ти бачив, що бот живий
             await context.bot.send_message(chat_id=chat_id, text=f"✅ Глава {chapter_num} успішно опублікована в канал!")
         else:
             await context.bot.send_message(chat_id=chat_id, text=f"✅ Глава {chapter_num} готова!\n\n{post_text}")
             
-        # Зберігаємо прогрес (наступна глава)
         save_current_chapter(chapter_num + 1)
         
-        # МАГІЯ СПІДРАНУ: Одразу запускаємо наступну главу через 5 секунд
-        # ПЕРЕКОНАЙСЯ, ЩО ЦЕЙ РЯДОК Є І ВІН НА ОДНОМУ РІВНІ ВІДСТУПУ З save_current_chapter
-        context.job_queue.run_once(auto_translate_job, 5, chat_id=chat_id, name="auto_translation")
+        context.job_queue.run_once(auto_translate_job, 30, chat_id=chat_id, name="auto_translation")
 
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Критична помилка авто-режиму: {str(e)}")
-# --- КОМАНДИ ДЛЯ КЕРУВАННЯ ---
+
 async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID and str(update.message.from_user.id) != str(ADMIN_ID): return
     
-    # Якщо користувач передав номер глави (напр. /auto 150)
     if context.args and context.args[0].isdigit():
         save_current_chapter(int(context.args[0]))
     
     current = get_current_chapter()
     chat_id = update.effective_chat.id
     
-    # Видаляємо старі завдання, якщо вони були
     current_jobs = context.job_queue.get_jobs_by_name("auto_translation")
     for job in current_jobs:
         job.schedule_removal()
         
-    # Запускаємо першу главу прямо зараз (через 1 секунду)
     context.job_queue.run_once(auto_translate_job, 1, chat_id=chat_id, name="auto_translation")
     
-    await update.message.reply_text(f"🚀 Режим кулемета увімкнено! Починаємо з глави {current}. Перерва між главами: 5 секунд.")
+    await update.message.reply_text(f"🚀 Авто-режим увімкнено! Починаємо з глави {current}. Перерва між главами: 30 секунд.")
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_ID and str(update.message.from_user.id) != str(ADMIN_ID): return
@@ -152,7 +138,6 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(f"⏸ Автопілот зупинено. Наступною буде глава {get_current_chapter()}.")
 
-# --- РУЧНА ОБРОБКА ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user: return
     if ADMIN_ID and str(update.message.from_user.id) != str(ADMIN_ID): return
@@ -164,10 +149,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         eng_title, eng_text = "", ""
 
         if user_input.isdigit():
-            await status_msg.edit_text(f"🔎 Шукаю главу {user_input}...")
             eng_title, eng_text = get_novelbin_chapter(user_input)
         elif user_input.startswith("http"):
-            await status_msg.edit_text(f"🔗 Завантажую за посиланням...")
             eng_title, eng_text = get_text_from_url(user_input)
         else:
             await status_msg.edit_text("🔢 Надішли номер глави (цифрами) або пряме посилання.")
@@ -179,39 +162,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         match = re.search(r'(?:Chapter|Ch\.?)\s*(\d+)\s*[:\-]?\s*(.*)', eng_title, re.IGNORECASE)
         if match:
-            chapter_num = match.group(1)
+            c_num = match.group(1)
             chapter_name_eng = match.group(2).strip()
         else:
-            chapter_num = user_input if user_input.isdigit() else "?"
-            chapter_name_eng = eng_title
+            c_num = user_input if user_input.isdigit() else "?"
+            chapter_name_eng = eng_title.replace("Shadow Slave", "").strip(" -:")
 
-        await status_msg.edit_text(f"📖 Знайдено: Глава {chapter_num}\n✨ Перекладаю назву та текст...")
-        
+        ukr_name = ""
         if chapter_name_eng:
-            ukr_chapter_name = translate_chunk(chapter_name_eng).strip()
-            ukr_chapter_name = ukr_chapter_name.replace("**", "").replace("*", "")
-            formatted_subtitle = f"Глава {chapter_num} - {ukr_chapter_name}"
+            ukr_name = translate_title(chapter_name_eng)
+        
+        if ukr_name:
+            formatted_subtitle = f"Глава {c_num}: {ukr_name}"
         else:
-            formatted_subtitle = f"Глава {chapter_num}"
+            formatted_subtitle = f"Глава {c_num}"
 
         ukr_text = translate_full_chapter(eng_text)
         if "[ПОМИЛКА ПЕРЕКЛАДУ]" in ukr_text:
              await status_msg.edit_text("❌ Помилка Gemini API.")
              return
 
-        await status_msg.edit_text("📝 Формую Telegraph...")
-        html_content = (
-            f"<h2>Тіньовий Раб - Shadow Slave</h2>"
-            f"<h3>{formatted_subtitle}</h3><hr><br>"
-            + ukr_text.replace('\n', '<br>')
-        )
+        paragraphs = [p.strip() for p in ukr_text.split('\n') if p.strip()]
+        html_content = "".join([f"<p>{p}</p>" for p in paragraphs])
+
         response = telegraph.create_page(
-            title=f"Shadow Slave | {formatted_subtitle}",
+            title=f"Тіньовий Раб | {formatted_subtitle}",
             html_content=html_content,
             author_name='Shadow Slave UKR'
         )
         telegraph_url = response['url']
-        post_text = f"Тіньовий Раб - Shadow Slave\n{formatted_subtitle}\n\n👉 {telegraph_url}"
+        post_text = f"📖 Тіньовий Раб\n🔖 {formatted_subtitle}\n\n👉 {telegraph_url}"
         
         if CHANNEL_ID:
             await context.bot.send_message(chat_id=CHANNEL_ID, text=post_text)

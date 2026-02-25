@@ -50,25 +50,20 @@ def split_text(text, max_chunk_size=3000):
 
 # НОВА ФУНКЦІЯ: Тільки для заголовків
 def translate_title(title_text, retries=3):
-    # Якщо назва порожня або це просто число, не мучимо ШІ
     if not title_text or title_text.isdigit():
         return title_text
 
     attempt = 0
     while attempt < retries:
         try:
-            # Максимально жорсткий промпт з прикладами
+            # Промпт без згадки назви новели, щоб уникнути плутанини
             prompt = (
-                "Ти — професійний перекладач. Переклади назву глави з англійської на українську. "
-                "Дотримуйся правил:\n"
-                "1. Видай ТІЛЬКИ переклад.\n"
-                "2. Не пиши назву новели.\n"
-                "3. Не використовуй лапки чи крапки.\n\n"
-                "Приклади:\n"
-                "Input: Nightmare Begins\nOutput: Кошмар починається\n"
-                "Input: From the Shadows\nOutput: Із тіней\n"
-                "Input: Light in the Dark\nOutput: Світло у темряві\n\n"
-                f"Input: {title_text}\nOutput:"
+                "Ти — професійний перекладач літератури. Твоє завдання — перекласти назву розділу книги. "
+                "Дотримуйся суворих правил:\n"
+                "1. Видай ТІЛЬКИ переклад назви.\n"
+                "2. Не додавай назву книги, серії чи авторів.\n"
+                "3. Не використовуй лапки, крапки чи вступні фрази.\n\n"
+                f"Текст для перекладу: {title_text}"
             )
             
             current_client = next(client_cycle)
@@ -78,11 +73,15 @@ def translate_title(title_text, retries=3):
             )
             
             if response.text:
-                result = response.text.strip().strip('"').strip("'")
-                # Якщо ШІ все одно намагається вставити Shadow Slave, ми це примусово видаляємо
-                result = result.replace("Shadow Slave", "").replace("Тіньовий раб", "").strip("- ").strip()
-                return result
-        except Exception as e:
+                result = response.text.strip().strip('"').strip("'").strip(".")
+                
+                # Жорстка фільтрація на випадок галюцинацій моделі
+                forbidden_words = ["Тіньовий раб", "Shadow Slave", "Тіньовий Раб"]
+                for word in forbidden_words:
+                    result = result.replace(word, "")
+                
+                return result.strip("- ").strip()
+        except Exception:
             time.sleep(2)
             attempt += 1
     return title_text
